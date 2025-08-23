@@ -3,7 +3,7 @@ import pandas as pd
 from typing import Dict, Set
 
 # ---------- Load Deployment Package ----------
-file_path = "."
+file_path = "../Deployment-Package-f3b09466-4d46-4319-a6e6-c032ca0706dd.deploymentpackage"
 with open(file_path, "r") as f:
     data = json.load(f)
 
