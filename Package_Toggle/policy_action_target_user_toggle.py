@@ -503,27 +503,28 @@ merged_df.sort_values("_pos_tuple", inplace=True, kind="mergesort")
 merged_df.reset_index(drop=True, inplace=True)
 
 def is_prefix(ancestor, descendant):
-    return len(ancestor) <= len(descendant) and ancestor == descendant[:len(ancestor)]
+    return len(ancestor) < len(descendant) and ancestor == descendant[:len(ancestor)]
 
-stack = []
+stack = []  # stack of (pos_tuple, value)
 for idx, row in merged_df.iterrows():
     segs = row["_pos_tuple"]
 
-    # Trim stack until top is ancestor of current
+    # Pop until stack top is ancestor of current node
     while stack and not is_prefix(stack[-1][0], segs):
         stack.pop()
 
     val = row.get("Value_action")
-    seed = str(val).strip() if pd.notna(val) else ""   # <-- safe conversion
-    has_cond = bool(str(row.get("Condition ID") or "").strip())
+    val = str(val).strip() if pd.notna(val) else ""
+    has_cond = pd.notna(row.get("Condition ID")) and str(row.get("Condition ID")).strip() != ""
 
-    if has_cond and seed:   # new seeding point
-        stack.append((segs, seed))
-        current = seed
+    if has_cond and val:  # only seed from Condition ID rows with value
+        stack.append((segs, val))
+        current = val
     else:
         current = stack[-1][1] if stack else ""
 
-    if not seed:
+    # Only fill children when Condition ID is not null
+    if not val and stack:
         merged_df.at[idx, "Value_action"] = current
 
 merged_df.drop(columns="_pos_tuple", inplace=True)
