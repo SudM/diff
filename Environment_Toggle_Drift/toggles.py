@@ -4,60 +4,83 @@ import re
 from .utils import logger, safe_load_json
 
 
-def build_regex_path(action_val, nested_names, version=None):
-    """Construct regex path from action and nested names."""
-    parts = []
+def normalize_tenant_name(name: str) -> str:
+    """Expand wl* tenant names into 'White Label ...'."""
+    if name and name.lower().startswith("wl"):
+        return "White Label " + name[2:]
+    return name
 
-    # Start
+
+def build_regex_path_for_toggle(tenant_name, nested_names=None, version=None):
+    """
+    Build entitlement-style regex path:
+    Check Permissions*/ *<tenant>*/ [*nested names*/] Entitlement Check* [*version*]
+    """
+    nested_names = nested_names or []
+
+    parts = []
     parts.append("Check Permissions*/")
 
-    # Action parts
-    if action_val.startswith("action:"):
-        action_parts = action_val.split("action:")[1].split("/")
-        parts.extend([f"*{p}*/" for p in action_parts])
+    if tenant_name:
+        parts.append(f"*{normalize_tenant_name(tenant_name)}*/")
 
-    # Tenant + nested names
-    parts.extend([f"*{n}*/" for n in nested_names])
+    for n in nested_names:
+        parts.append(f"*{n}*/")
 
-    # Entitlement Check
-    parts.append("Entitlement Check*")
+    parts.append("*Entitlement Check*")
 
-    # Add version if present
     if version:
         parts.append(f"*{version}*")
 
     return "".join(parts)
 
 
-def collect_disabled_regex(env, action_val, node, path_parts, results):
-    """Recursively collect regex paths + JSON snippets wherever isEnabled == False."""
+def collect_disabled_regex(env, action_val, node, path_parts, results, tenant=None):
+    """
+    Recursively collect regex paths + JSON snippets wherever isEnabled == False.
+    - Tenant-driven path if tenant exists
+    - Fallback to '*/ Entitlement Check*' if action itself is disabled
+    """
     if isinstance(node, dict):
         new_parts = path_parts[:]
         if "name" in node:
             new_parts.append(node["name"])
 
+        # Track tenant if found
+        if "tenants" in node or (tenant is None and "name" in node and "isEnabled" in node):
+            tenant = node.get("name", tenant)
+
         # If disabled → record regex path + snippet
         if "isEnabled" in node and not node.get("isEnabled", True):
             version = node.get("name") if new_parts and new_parts[-1].lower().startswith("v") else None
+
+            if tenant:
+                regex_path = build_regex_path_for_toggle(
+                    tenant,
+                    new_parts[:-1] if version else new_parts,
+                    version
+                )
+            else:
+                # Action-level OFF fallback
+                regex_path = "*/ *Entitlement Check*"
+                if version:
+                    regex_path += f"*{version}*"
+
             results.append({
                 "Env": env,
                 "Action": action_val,
-                "Path": build_regex_path(
-                    action_val,
-                    new_parts[:-1] if version else new_parts,
-                    version
-                ),
-                "Snippet": json.dumps(node, indent=2)   # pretty printed JSON
+                "Path": regex_path,
+                "Snippet": json.dumps(node, indent=2)
             })
 
         # Recurse into children
         for k, v in node.items():
             if isinstance(v, (dict, list)):
-                collect_disabled_regex(env, action_val, v, new_parts, results)
+                collect_disabled_regex(env, action_val, v, new_parts, results, tenant)
 
     elif isinstance(node, list):
         for item in node:
-            collect_disabled_regex(env, action_val, item, path_parts, results)
+            collect_disabled_regex(env, action_val, item, path_parts, results, tenant)
 
 
 def regex_from_path(regex_path: str) -> str:
@@ -100,6 +123,15 @@ def integrate_toggles(merged_df: pd.DataFrame, toggle_files: dict):
 
         for cp in tdata.get("toggles", {}).get("checkPermissions", []):
             action_val = cp.get("action", "")
+            # If action itself disabled (and no tenants), handle it
+            if "isEnabled" in cp and not cp.get("isEnabled", True) and not cp.get("tenants"):
+                all_results.append({
+                    "Env": env,
+                    "Action": action_val,
+                    "Path": "*/ Entitlement Check*",
+                    "Snippet": json.dumps(cp, indent=2)
+                })
+            # Otherwise traverse tenants
             for tenant in cp.get("tenants", []):
                 collect_disabled_regex(env, action_val, tenant, [], all_results)
 
