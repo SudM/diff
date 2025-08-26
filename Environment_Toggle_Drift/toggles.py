@@ -5,10 +5,60 @@ from .utils import logger, safe_load_json
 
 
 def normalize_tenant_name(name: str) -> str:
-    """Expand wl* tenant names into 'White Label ...'."""
-    if name and name.lower().startswith("wl"):
-        return "White Label " + name[2:]
-    return name
+    """Normalize tenant names to human-friendly form with WL expansion, hardcoded mappings, and heuristics."""
+    if not name:
+        return name
+
+    lower_name = name.lower()
+
+    # --- Hardcoded special mappings ---
+    special_map = {
+        "wlopenbanking": "White Label Open Banking",
+        "wlexternaloperator": "White Label External Operator",
+        "ibprospect": "IB Prospect",
+        "opendata": "Open Data",
+    }
+    if lower_name in special_map:
+        return special_map[lower_name]
+
+    # --- Generic WL expansion ---
+    if lower_name.startswith("wl"):
+        rest = name[2:]
+        # Capitalize first letter and try to split if it's a compound
+        return "White Label " + generic_split(rest)
+
+    # --- Generic beautifier ---
+    return generic_split(name)
+
+
+def generic_split(word: str) -> str:
+    """
+    Try to split compressed single words into more meaningful tokens.
+    Rules:
+      - Split before uppercase letters
+      - Split known substrings (ib, open, data, bank, prospect, external, operator)
+      - Capitalize each token
+    """
+    lower_word = word.lower()
+
+    # Dictionary-based splitting
+    tokens = []
+    known_tokens = ["ib", "open", "data", "bank", "prospect", "external", "operator"]
+    i = 0
+    while i < len(lower_word):
+        matched = False
+        for t in sorted(known_tokens, key=len, reverse=True):
+            if lower_word.startswith(t, i):
+                tokens.append(t.capitalize())
+                i += len(t)
+                matched = True
+                break
+        if not matched:
+            tokens.append(lower_word[i].upper())
+            i += 1
+
+    # Join tokens together with spaces
+    return " ".join(tokens)
 
 
 def build_regex_path_for_toggle(tenant_name, nested_names=None, version=None):
@@ -192,3 +242,4 @@ def integrate_toggles(merged_df: pd.DataFrame, toggle_files: dict):
             logger.warning(f"  Env={row['Env']} | Action={row['Action']} | Path={row['Path']}")
 
     return merged_df, df_toggles, df_missing
+
