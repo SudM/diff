@@ -85,7 +85,8 @@ merged_df = propagate_conditions(merged_df)
 merged_df = filter_to_entitlement_checks(merged_df)
 
 # Toggle integration
-merged_df, df_toggles, df_missing = integrate_toggles(merged_df, toggle_map)
+merged_df, df_toggles, df_missing, toggle_drift_df, policies_with_targets_df = integrate_toggles(merged_df, toggle_map)
+
 
 # Rename Value_action → Action for display
 if "Value_action" in merged_df.columns:
@@ -95,47 +96,58 @@ if "Value_action" in merged_df.columns:
 env_cols = [c for c in merged_df.columns if c.upper().startswith(("SIT", "UAT", "PROD"))]
 drift_df = merged_df[["Position", "ID", "Policy FullPath", "Action"] + env_cols]
 
-# ---------------- Tabs ----------------
-tab1, tab2, tab3, tab4, tab5 = st.tabs(
-    ["🌀 Drift", "📂 Policy Tree", "⚡ Actions", "🚦 Toggles", "⚠️ Missing Toggles"]
+# Define tabs
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+    ["🌀 Toggle Drift", "📊 Policies with Targets", "📂 Policy Tree", "⚡ Actions", "🚦 Toggles", "⚠️ Missing Toggles"]
 )
 
+# --- Toggle Drift tab with row coloring ---
 with tab1:
-    st.subheader("Drift Dataset")
+    st.subheader("Toggle Drift")
 
     def drift_styler(row):
+        env_cols = [c for c in toggle_drift_df.columns if c.upper().startswith(("SIT", "UAT", "PROD"))]
         env_values = [str(row[c]).upper() for c in env_cols if pd.notna(row[c]) and str(row[c]).strip() != ""]
         if not env_values:
-            return [""] * len(row)   # no toggles applied → no color
+            return [""] * len(row)
         if all(v == "OFF" for v in env_values):
-            return ['background-color: #FFCCCC'] * len(row)   # light red for all OFF
+            return ['background-color: #FFCCCC'] * len(row)   # light red
         elif len(set(env_values)) > 1:
-            return ['background-color: #FFBF00'] * len(row)   # amber drift (different OFF/blank)
+            return ['background-color: #FFBF00'] * len(row)   # amber drift
         return [""] * len(row)
 
+    if not toggle_drift_df.empty:
+        styled = toggle_drift_df.style.apply(drift_styler, axis=1)
+        st.dataframe(styled, use_container_width=True)
+    else:
+        st.info("✅ No toggle drift found!")
 
-    styled = drift_df.style.apply(drift_styler, axis=1)
-    st.dataframe(styled, use_container_width=True)
-
+# --- Policies with Targets tab (plain) ---
 with tab2:
+    st.subheader("Policies with Targets")
+    if not policies_with_targets_df.empty:
+        st.dataframe(policies_with_targets_df, use_container_width=True)
+    else:
+        st.info("✅ All policies were covered by toggles.")
+
+with tab3:
     st.subheader("Policy Tree")
     st.dataframe(df_policy_tree[["Position", "ID", "Policy FullPath"]], use_container_width=True)
 
-with tab3:
+with tab4:
     st.subheader("Actions")
     st.dataframe(df_action, use_container_width=True)
 
-with tab4:
+with tab5:
     st.subheader("Applied Toggles")
     st.dataframe(df_toggles, use_container_width=True)
 
-with tab5:
+with tab6:
     st.subheader("Missing Toggles")
     if df_missing.empty:
         st.info("✅ No missing toggles found!")
     else:
         st.dataframe(df_missing, use_container_width=True)
-
 # ---------------- Downloads ----------------
 st.subheader("📥 Download Results")
 
@@ -147,9 +159,10 @@ def to_excel(dfs: dict):
     return output.getvalue()
 
 excel_data = to_excel({
+    "Toggle Drift": toggle_drift_df,
+    "Policies with Targets": policies_with_targets_df,
     "Policy_Tree": df_policy_tree,
     "Action": df_action,
-    "Drift": drift_df,
     "Toggles": df_toggles,
     "Missing Toggles": df_missing,
 })
