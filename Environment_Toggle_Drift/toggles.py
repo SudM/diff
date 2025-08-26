@@ -5,60 +5,19 @@ from .utils import logger, safe_load_json
 
 
 def normalize_tenant_name(name: str) -> str:
-    """Normalize tenant names to human-friendly form with WL expansion, hardcoded mappings, and heuristics."""
+    """Normalize tenant names with WL expansion and hardcoded special cases."""
     if not name:
         return name
 
     lower_name = name.lower()
 
-    # --- Hardcoded special mappings ---
-    special_map = {
-        "wlopenbanking": "White Label Open Banking",
-        "wlexternaloperator": "White Label External Operator",
-        "ibprospect": "IB Prospect",
-        "opendata": "Open Data",
-    }
-    if lower_name in special_map:
-        return special_map[lower_name]
-
     # --- Generic WL expansion ---
     if lower_name.startswith("wl"):
         rest = name[2:]
-        # Capitalize first letter and try to split if it's a compound
-        return "White Label " + generic_split(rest)
+        return "White Label " + rest.capitalize()
 
-    # --- Generic beautifier ---
-    return generic_split(name)
-
-
-def generic_split(word: str) -> str:
-    """
-    Try to split compressed single words into more meaningful tokens.
-    Rules:
-      - Split before uppercase letters
-      - Split known substrings (ib, open, data, bank, prospect, external, operator)
-      - Capitalize each token
-    """
-    lower_word = word.lower()
-
-    # Dictionary-based splitting
-    tokens = []
-    known_tokens = ["ib", "open", "data", "bank", "prospect", "external", "operator"]
-    i = 0
-    while i < len(lower_word):
-        matched = False
-        for t in sorted(known_tokens, key=len, reverse=True):
-            if lower_word.startswith(t, i):
-                tokens.append(t.capitalize())
-                i += len(t)
-                matched = True
-                break
-        if not matched:
-            tokens.append(lower_word[i].upper())
-            i += 1
-
-    # Join tokens together with spaces
-    return " ".join(tokens)
+    # --- Default: just capitalize first letter ---
+    return name.capitalize()
 
 
 def build_regex_path_for_toggle(tenant_name, nested_names=None, version=None):
@@ -140,7 +99,7 @@ def collect_disabled_regex(env, action_val, node, path_parts, results, tenant=No
 def regex_from_path(regex_path: str) -> str:
     """
     Convert our RegexPath with * wildcards into a real regex pattern.
-    Example: "*edge*/ *ACCOUNT*/ *Entitlement Check* *v2*" -> ".*edge.*/ .*ACCOUNT.*/ .*Entitlement Check.* .*v2.*"
+    Example: "*edge*/ *ACCOUNT*/ *Entitlement Check* *v2*" -> ".*edge.*/ .*ACCOUNT.*/ .*EntitlementCheck.* .*v2.*"
     """
     pattern = regex_path.replace("*/", ".*")   # handle segment separators
     pattern = pattern.replace("*", ".*")       # handle remaining wildcards
@@ -210,13 +169,15 @@ def integrate_toggles(merged_df: pd.DataFrame, toggle_files: dict):
         action_val = trow["Action"]
         regex_path = str(trow["Path"])
 
-        # Convert regex path
-        pattern = regex_from_path(regex_path)
+        # Convert regex path → regex pattern
+        pattern = regex_from_path(regex_path).replace(" ", "")
 
-        # Build mask
+        # Normalize Policy FullPath (strip spaces)
+        normalized_paths = merged_df["Policy FullPath"].str.replace(" ", "", regex=False)
+
         try:
             mask = merged_df["Value_action"].eq(action_val) & \
-                   merged_df["Policy FullPath"].str.contains(pattern, case=False, na=False, regex=True)
+                   normalized_paths.str.contains(pattern, case=False, na=False, regex=True)
         except re.error as e:
             logger.error(f"Invalid regex built from {regex_path}: {e}")
             continue
@@ -242,4 +203,3 @@ def integrate_toggles(merged_df: pd.DataFrame, toggle_files: dict):
             logger.warning(f"  Env={row['Env']} | Action={row['Action']} | Path={row['Path']}")
 
     return merged_df, df_toggles, df_missing
-
