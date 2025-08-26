@@ -14,7 +14,7 @@ def normalize_tenant_name(name: str) -> str:
 def build_regex_path_for_toggle(tenant_name, nested_names=None, version=None):
     """
     Build entitlement-style regex path:
-    Check Permissions*/ *<tenant>*/ [*nested names*/] Entitlement Check* [*version*]
+    Check Permissions*/ *<tenant>*/ [*nested names*/] *Entitlement Check* [*version*]
     """
     nested_names = nested_names or []
 
@@ -27,6 +27,7 @@ def build_regex_path_for_toggle(tenant_name, nested_names=None, version=None):
     for n in nested_names:
         parts.append(f"*{n}*/")
 
+    # Always end with entitlement check
     parts.append("*Entitlement Check*")
 
     if version:
@@ -39,20 +40,23 @@ def collect_disabled_regex(env, action_val, node, path_parts, results, tenant=No
     """
     Recursively collect regex paths + JSON snippets wherever isEnabled == False.
     - Tenant-driven path if tenant exists
-    - Fallback to '*/ Entitlement Check*' if action itself is disabled
+    - Fallback to '*/ *Entitlement Check*' if action itself is disabled
     """
     if isinstance(node, dict):
         new_parts = path_parts[:]
-        if "name" in node:
-            new_parts.append(node["name"])
+        node_name = node.get("name")
 
-        # Track tenant if found
-        if "tenants" in node or (tenant is None and "name" in node and "isEnabled" in node):
-            tenant = node.get("name", tenant)
+        # If this node is a tenant
+        if tenant is None and node_name:
+            tenant = node_name
+        else:
+            # Only non-tenant names go into nested path parts
+            if node_name:
+                new_parts.append(node_name)
 
         # If disabled → record regex path + snippet
         if "isEnabled" in node and not node.get("isEnabled", True):
-            version = node.get("name") if new_parts and new_parts[-1].lower().startswith("v") else None
+            version = node_name if node_name and node_name.lower().startswith("v") else None
 
             if tenant:
                 regex_path = build_regex_path_for_toggle(
@@ -86,7 +90,7 @@ def collect_disabled_regex(env, action_val, node, path_parts, results, tenant=No
 def regex_from_path(regex_path: str) -> str:
     """
     Convert our RegexPath with * wildcards into a real regex pattern.
-    Example: "*edge*/ *ACCOUNT*/ Entitlement Check* *v2*" -> ".*edge.*/ .*ACCOUNT.*/ Entitlement Check.* .*v2.*"
+    Example: "*edge*/ *ACCOUNT*/ *Entitlement Check* *v2*" -> ".*edge.*/ .*ACCOUNT.*/ .*Entitlement Check.* .*v2.*"
     """
     pattern = regex_path.replace("*/", ".*")   # handle segment separators
     pattern = pattern.replace("*", ".*")       # handle remaining wildcards
@@ -123,14 +127,16 @@ def integrate_toggles(merged_df: pd.DataFrame, toggle_files: dict):
 
         for cp in tdata.get("toggles", {}).get("checkPermissions", []):
             action_val = cp.get("action", "")
+
             # If action itself disabled (and no tenants), handle it
             if "isEnabled" in cp and not cp.get("isEnabled", True) and not cp.get("tenants"):
                 all_results.append({
                     "Env": env,
                     "Action": action_val,
-                    "Path": "*/ Entitlement Check*",
+                    "Path": "*/ *Entitlement Check*",
                     "Snippet": json.dumps(cp, indent=2)
                 })
+
             # Otherwise traverse tenants
             for tenant in cp.get("tenants", []):
                 collect_disabled_regex(env, action_val, tenant, [], all_results)
