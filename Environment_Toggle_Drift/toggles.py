@@ -115,14 +115,23 @@ def integrate_toggles(merged_df: pd.DataFrame, toggle_files: dict):
         toggle_files (dict): Mapping {ENV: file_path or UploadedFile}
 
     Returns:
-        (pd.DataFrame, pd.DataFrame, pd.DataFrame):
-            - updated merged_df
-            - df_toggles (all OFF toggle records from files, with RegexPath + Snippet)
-            - df_missing (toggle records that didn't match any row)
+        (
+            pd.DataFrame,  # updated merged_df
+            pd.DataFrame,  # df_toggles (all OFF toggle records from files)
+            pd.DataFrame,  # df_missing (toggle records not matched)
+            pd.DataFrame,  # toggle_drift_df (only matched rows with OFF)
+            pd.DataFrame   # policies_with_targets_df (everything else)
+        )
     """
     if not toggle_files:
         logger.info("No toggle files provided, skipping toggle integration.")
-        return merged_df, pd.DataFrame(columns=["Env", "Action", "Path", "Snippet"]), pd.DataFrame(columns=["Env", "Action", "Path", "Snippet"])
+        return (
+            merged_df,
+            pd.DataFrame(columns=["Env", "Action", "Path", "Snippet"]),
+            pd.DataFrame(columns=["Env", "Action", "Path", "Snippet"]),
+            pd.DataFrame(),
+            pd.DataFrame()
+        )
 
     all_results = []
 
@@ -159,7 +168,7 @@ def integrate_toggles(merged_df: pd.DataFrame, toggle_files: dict):
 
     if df_toggles.empty:
         logger.info("No OFF toggle records found in provided files.")
-        return merged_df, df_toggles, pd.DataFrame(columns=df_toggles.columns)
+        return merged_df, df_toggles, pd.DataFrame(columns=df_toggles.columns), pd.DataFrame(), pd.DataFrame()
 
     missing_records = []
 
@@ -195,11 +204,14 @@ def integrate_toggles(merged_df: pd.DataFrame, toggle_files: dict):
         f"Toggles integrated: {applied_count} applied, {len(df_missing)} unmatched."
     )
 
-    # Preview unmatched in logs
-    if not df_missing.empty:
-        preview = df_missing.head(5).to_dict(orient="records")
-        logger.warning(f"First {len(preview)} unmatched toggle(s):")
-        for row in preview:
-            logger.warning(f"  Env={row['Env']} | Action={row['Action']} | Path={row['Path']}")
+    # --- Split into Toggle Drift vs Policies with Targets ---
+    env_cols = [c for c in merged_df.columns if c.upper().startswith(("SIT", "UAT", "PROD"))]
+    drift_df = merged_df[["Position", "ID", "Policy FullPath", "Value_action"] + env_cols]
 
-    return merged_df, df_toggles, df_missing
+    # Rename for consistency
+    drift_df = drift_df.rename(columns={"Value_action": "Action"})
+
+    toggle_drift_df = drift_df[drift_df[env_cols].eq("OFF").any(axis=1)]
+    policies_with_targets_df = drift_df[~drift_df.index.isin(toggle_drift_df.index)]
+
+    return merged_df, df_toggles, df_missing, toggle_drift_df, policies_with_targets_df
