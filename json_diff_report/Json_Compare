@@ -23,8 +23,6 @@ HTML_HEADER = """
 </head>
 <body>
 <h1>JSON Diff Report</h1>
-<table>
-<tr><th>Path</th><th>File 1</th><th>File 2</th></tr>
 """
 
 HTML_FOOTER = """
@@ -89,7 +87,17 @@ def main():
     if not rows:
         rows.append("<tr><td colspan='3'>No differences found ✅</td></tr>")
 
-    html = HTML_HEADER + "\n".join(rows) + HTML_FOOTER
+    # dynamic table header with file names
+    table_header = f"""
+    <table>
+    <tr>
+      <th>Path</th>
+      <th>{args.file1}</th>
+      <th>{args.file2}</th>
+    </tr>
+    """
+
+    html = HTML_HEADER + table_header + "\n".join(rows) + HTML_FOOTER
     with open(args.output, "w", encoding="utf-8") as out:
         out.write(html)
 
