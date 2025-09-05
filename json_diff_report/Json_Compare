@@ -1,55 +1,82 @@
 #!/usr/bin/env python3
 import json
 import argparse
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, List
+
+HTML_HEADER = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>JSON Diff Report</title>
+<style>
+  body { font-family: Arial, sans-serif; margin: 20px; }
+  h1 { color: #333; }
+  table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+  th, td { border: 1px solid #ccc; padding: 8px; text-align: left; }
+  th { background: #f4f4f4; }
+  tr.added { background: #e7f7ed; }   /* green */
+  tr.deleted { background: #fde7e7; } /* red */
+  tr.modified { background: #fff7e6; }/* yellow */
+  code { background: #f9f9f9; padding: 2px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<h1>JSON Diff Report</h1>
+<table>
+<tr><th>Path</th><th>File 1</th><th>File 2</th></tr>
+"""
+
+HTML_FOOTER = """
+</table>
+</body>
+</html>
+"""
 
 def compare_json(obj1: Any, obj2: Any, path: str = "") -> List[str]:
     """
-    Recursively compare two JSON objects and return list of differences.
+    Recursively compare two JSON objects and return HTML table rows.
     """
-    diffs = []
+    rows = []
 
-    # Case 1: Different types
     if type(obj1) != type(obj2):
-        diffs.append(f"{path} (type mismatch) → {type(obj1).__name__} vs {type(obj2).__name__}")
-        return diffs
+        rows.append(f"<tr class='modified'><td><code>{path}</code></td><td>{obj1}</td><td>{obj2}</td></tr>")
+        return rows
 
-    # Case 2: Dict
     if isinstance(obj1, dict):
         keys = set(obj1.keys()) | set(obj2.keys())
         for key in keys:
             new_path = f"{path}.{key}" if path else key
             if key not in obj1:
-                diffs.append(f"{new_path} → (missing in first) vs {obj2[key]}")
+                rows.append(f"<tr class='added'><td><code>{new_path}</code></td><td>(missing)</td><td>{obj2[key]}</td></tr>")
             elif key not in obj2:
-                diffs.append(f"{new_path} → {obj1[key]} vs (missing in second)")
+                rows.append(f"<tr class='deleted'><td><code>{new_path}</code></td><td>{obj1[key]}</td><td>(missing)</td></tr>")
             else:
-                diffs.extend(compare_json(obj1[key], obj2[key], new_path))
+                rows.extend(compare_json(obj1[key], obj2[key], new_path))
 
-    # Case 3: List
     elif isinstance(obj1, list):
         max_len = max(len(obj1), len(obj2))
         for i in range(max_len):
             new_path = f"{path}[{i}]"
             if i >= len(obj1):
-                diffs.append(f"{new_path} → (missing in first) vs {obj2[i]}")
+                rows.append(f"<tr class='added'><td><code>{new_path}</code></td><td>(missing)</td><td>{obj2[i]}</td></tr>")
             elif i >= len(obj2):
-                diffs.append(f"{new_path} → {obj1[i]} vs (missing in second)")
+                rows.append(f"<tr class='deleted'><td><code>{new_path}</code></td><td>{obj1[i]}</td><td>(missing)</td></tr>")
             else:
-                diffs.extend(compare_json(obj1[i], obj2[i], new_path))
+                rows.extend(compare_json(obj1[i], obj2[i], new_path))
 
-    # Case 4: Primitive values
-    else:
+    else:  # primitive values
         if obj1 != obj2:
-            diffs.append(f"{path} → {obj1} vs {obj2}")
+            rows.append(f"<tr class='modified'><td><code>{path}</code></td><td>{obj1}</td><td>{obj2}</td></tr>")
 
-    return diffs
+    return rows
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Compare two JSON files element by element.")
+    parser = argparse.ArgumentParser(description="Compare two JSON files and output HTML report.")
     parser.add_argument("file1", help="Path to first JSON file")
     parser.add_argument("file2", help="Path to second JSON file")
+    parser.add_argument("-o", "--output", default="json_diff_report.html", help="Output HTML file")
     args = parser.parse_args()
 
     with open(args.file1, "r", encoding="utf-8") as f1:
@@ -58,14 +85,15 @@ def main():
     with open(args.file2, "r", encoding="utf-8") as f2:
         json2 = json.load(f2)
 
-    differences = compare_json(json1, json2)
+    rows = compare_json(json1, json2)
+    if not rows:
+        rows.append("<tr><td colspan='3'>No differences found ✅</td></tr>")
 
-    if not differences:
-        print("✅ The two JSON files are identical.")
-    else:
-        print("❌ Differences found:")
-        for diff in differences:
-            print(" -", diff)
+    html = HTML_HEADER + "\n".join(rows) + HTML_FOOTER
+    with open(args.output, "w", encoding="utf-8") as out:
+        out.write(html)
+
+    print(f"✅ Report saved to {args.output}")
 
 
 if __name__ == "__main__":
