@@ -1,113 +1,107 @@
 #!/usr/bin/env python3
 import json
 import argparse
-from typing import Any, List
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-HTML_HEADER = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<title>JSON Diff Report</title>
+CSS = """
 <style>
-  body { font-family: Arial, sans-serif; margin: 20px; }
-  h1 { color: #333; }
-  table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-  th, td { border: 1px solid #ccc; padding: 8px; text-align: left; }
-  th { background: #f4f4f4; }
-  tr.added { background: #e7f7ed; }   /* green */
-  tr.deleted { background: #fde7e7; } /* red background */
-  tr.modified td { color: red; font-weight: bold; } /* modified values in red */
-  code { background: #f9f9f9; padding: 2px 5px; border-radius: 4px; }
+  body { font-family: system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; margin:24px; line-height:1.5; }
+  h1,h2,h3 { margin-top:0; }
+  .section { border:1px solid #ddd; border-radius:12px; padding:16px; margin-bottom:16px; }
+  table { width:100%; border-collapse:collapse; margin-top:8px; }
+  th, td { border:1px solid #eee; padding:8px; text-align:left; vertical-align:top; }
+  th { background:#f7f7f7; }
+  code, pre { background:#f9f9f9; padding:2px 6px; border-radius:6px; }
+  .small { color:#666; font-size:13px; }
+
+  tr.status-added    { background:#e7f7ed; }  /* green */
+  tr.status-deleted  { background:#fde7e7; }  /* red */
+  tr.status-modified { background:#fff7e6; }  /* yellow */
+
+  pre.json-raw { background:#f9f9ff; border:1px dashed #ddd; border-radius:10px; padding:10px; overflow:auto; }
+
+  .value-diff { color:#ff0000; font-weight:700; }
+  .missing    { color:#ff0000; font-weight:700; }
 </style>
-</head>
-<body>
-<h1>JSON Diff Report</h1>
 """
 
-HTML_FOOTER = """
-</table>
-</body>
-</html>
-"""
+def load_json(path: Path) -> Any:
+    return json.loads(path.read_text(encoding="utf-8"))
 
-def compare_json(obj1: Any, obj2: Any, path: str = "") -> List[str]:
-    """
-    Recursively compare two JSON objects and return HTML table rows.
-    """
-    rows = []
+def dicts_by_class(items: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Index objects by their 'class' key"""
+    out: Dict[str, Dict[str, Any]] = {}
+    for it in items or []:
+        if isinstance(it, dict) and "class" in it:
+            out[str(it["class"])] = it
+    return out
 
-    if type(obj1) != type(obj2):
-        rows.append(f"<tr class='modified'><td><code>{path}</code></td><td>{obj1}</td><td>{obj2}</td></tr>")
-        return rows
+def build_report(v1_path: Path, v2_path: Path) -> str:
+    j1 = load_json(v1_path)
+    j2 = load_json(v2_path)
 
-    if isinstance(obj1, dict):
-        keys = set(obj1.keys()) | set(obj2.keys())
-        for key in keys:
-            new_path = f"{path} -> {key}" if path else key
-            if key not in obj1:
-                rows.append(f"<tr class='added'><td><code>{new_path}</code></td><td>(missing)</td><td>{obj2[key]}</td></tr>")
-            elif key not in obj2:
-                rows.append(f"<tr class='deleted'><td><code>{new_path}</code></td><td>{obj1[key]}</td><td>(missing)</td></tr>")
-            else:
-                rows.extend(compare_json(obj1[key], obj2[key], new_path))
+    v1_map = dicts_by_class(j1)
+    v2_map = dicts_by_class(j2)
 
-    elif isinstance(obj1, list):
-        max_len = max(len(obj1), len(obj2))
-        for i in range(max_len):
-            new_path = f"{path}[{i}]"
-            if i >= len(obj1):
-                rows.append(f"<tr class='added'><td><code>{new_path}</code></td><td>(missing)</td><td>{obj2[i]}</td></tr>")
-            elif i >= len(obj2):
-                rows.append(f"<tr class='deleted'><td><code>{new_path}</code></td><td>{obj1[i]}</td><td>(missing)</td></tr>")
-            else:
-                rows.extend(compare_json(obj1[i], obj2[i], new_path))
+    added   = sorted(set(v2_map) - set(v1_map))
+    deleted = sorted(set(v1_map) - set(v2_map))
+    common  = sorted(set(v1_map) & set(v2_map))
 
-    else:  # primitive values
-        if obj1 != obj2:
-            rows.append(f"<tr class='modified'><td><code>{path}</code></td><td>{obj1}</td><td>{obj2}</td></tr>")
+    parts: List[str] = [
+        "<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>",
+        "<title>Class JSON Diff Report</title>",
+        CSS,
+        "</head><body>",
+        "<h1>Class JSON Diff Report</h1>",
+        "<div class='section'><h2>Summary</h2><ul>"
+    ]
 
-    return rows
+    parts.append(f"<li><b>Classes in {v1_path.name}</b>: {len(v1_map)}</li>")
+    parts.append(f"<li><b>Classes in {v2_path.name}</b>: {len(v2_map)}</li>")
+    parts.append(f"<li><b>Added</b>: {len(added)} / <b>Deleted</b>: {len(deleted)} / <b>Modified</b>: {0}</li>")
 
+    parts.append(f"</ul><div class='small'>Compared files: <code>{v1_path.name}</code> and <code>{v2_path.name}</code></div></div>")
+
+    # Table for class differences
+    parts.append("<div class='section'><h2>Class Comparison</h2>")
+    parts.append("<table><tr><th>Group</th><th>Status</th><th>Class</th>"
+                 f"<th>{v1_path.name}</th><th>{v2_path.name}</th></tr>")
+
+    # Added
+    for cls in added:
+        block = json.dumps(v2_map[cls], indent=2)
+        parts.append(f"<tr class='status-added'><td>class</td><td>Added</td><td><code>{cls}</code></td><td></td>"
+                     f"<td><pre class='json-raw'>{block}</pre></td></tr>")
+
+    # Deleted
+    for cls in deleted:
+        block = json.dumps(v1_map[cls], indent=2)
+        parts.append(f"<tr class='status-deleted'><td>class</td><td>Deleted</td><td><code>{cls}</code></td>"
+                     f"<td><pre class='json-raw'>{block}</pre></td><td></td></tr>")
+
+    # Modified check (deep compare)
+    for cls in common:
+        if v1_map[cls] != v2_map[cls]:
+            block1 = json.dumps(v1_map[cls], indent=2)
+            block2 = json.dumps(v2_map[cls], indent=2)
+            parts.append(f"<tr class='status-modified'><td>class</td><td>Modified</td><td><code>{cls}</code></td>"
+                         f"<td><pre class='json-raw'>{block1}</pre></td><td><pre class='json-raw'>{block2}</pre></td></tr>")
+
+    parts.append("</table></div>")
+    parts.append("</body></html>")
+    return "".join(parts)
 
 def main():
-    parser = argparse.ArgumentParser(description="Compare two JSON files and output HTML report.")
-    parser.add_argument("file1", help="Path to first JSON file")
-    parser.add_argument("file2", help="Path to second JSON file")
-    parser.add_argument("-o", "--output", default="json_diff_report.html", help="Output HTML file")
+    parser = argparse.ArgumentParser(description="Compare JSON files at class level and output HTML diff.")
+    parser.add_argument("v1", type=Path, help="First JSON file")
+    parser.add_argument("v2", type=Path, help="Second JSON file")
+    parser.add_argument("-o", "--output", type=Path, default=Path("Class_Diff_Report.html"), help="Output HTML file")
     args = parser.parse_args()
 
-    with open(args.file1, "r", encoding="utf-8") as f1:
-        json1 = json.load(f1)
-
-    with open(args.file2, "r", encoding="utf-8") as f2:
-        json2 = json.load(f2)
-
-    rows = compare_json(json1, json2)
-    if not rows:
-        rows.append("<tr><td colspan='3'>No differences found ✅</td></tr>")
-
-    # use filename without extension & path
-    file1_name = Path(args.file1).stem
-    file2_name = Path(args.file2).stem
-
-    # dynamic table header with file names
-    table_header = f"""
-    <table>
-    <tr>
-      <th>Path (class → doctype → block)</th>
-      <th>{file1_name}</th>
-      <th>{file2_name}</th>
-    </tr>
-    """
-
-    html = HTML_HEADER + table_header + "\n".join(rows) + HTML_FOOTER
-    with open(args.output, "w", encoding="utf-8") as out:
-        out.write(html)
-
-    print(f"✅ Report saved to {args.output}")
-
+    html = build_report(args.v1, args.v2)
+    args.output.write_text(html, encoding="utf-8")
+    print("✅ Report saved to:", args.output.resolve())
 
 if __name__ == "__main__":
     main()
