@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+import json
+import argparse
+from typing import Any, Dict, List, Tuple, Union
+
+def compare_json(obj1: Any, obj2: Any, path: str = "") -> List[str]:
+    """
+    Recursively compare two JSON objects and return list of differences.
+    """
+    diffs = []
+
+    # Case 1: Different types
+    if type(obj1) != type(obj2):
+        diffs.append(f"{path} (type mismatch) → {type(obj1).__name__} vs {type(obj2).__name__}")
+        return diffs
+
+    # Case 2: Dict
+    if isinstance(obj1, dict):
+        keys = set(obj1.keys()) | set(obj2.keys())
+        for key in keys:
+            new_path = f"{path}.{key}" if path else key
+            if key not in obj1:
+                diffs.append(f"{new_path} → (missing in first) vs {obj2[key]}")
+            elif key not in obj2:
+                diffs.append(f"{new_path} → {obj1[key]} vs (missing in second)")
+            else:
+                diffs.extend(compare_json(obj1[key], obj2[key], new_path))
+
+    # Case 3: List
+    elif isinstance(obj1, list):
+        max_len = max(len(obj1), len(obj2))
+        for i in range(max_len):
+            new_path = f"{path}[{i}]"
+            if i >= len(obj1):
+                diffs.append(f"{new_path} → (missing in first) vs {obj2[i]}")
+            elif i >= len(obj2):
+                diffs.append(f"{new_path} → {obj1[i]} vs (missing in second)")
+            else:
+                diffs.extend(compare_json(obj1[i], obj2[i], new_path))
+
+    # Case 4: Primitive values
+    else:
+        if obj1 != obj2:
+            diffs.append(f"{path} → {obj1} vs {obj2}")
+
+    return diffs
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Compare two JSON files element by element.")
+    parser.add_argument("file1", help="Path to first JSON file")
+    parser.add_argument("file2", help="Path to second JSON file")
+    args = parser.parse_args()
+
+    with open(args.file1, "r", encoding="utf-8") as f1:
+        json1 = json.load(f1)
+
+    with open(args.file2, "r", encoding="utf-8") as f2:
+        json2 = json.load(f2)
+
+    differences = compare_json(json1, json2)
+
+    if not differences:
+        print("✅ The two JSON files are identical.")
+    else:
+        print("❌ Differences found:")
+        for diff in differences:
+            print(" -", diff)
+
+
+if __name__ == "__main__":
+    main()
