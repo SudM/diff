@@ -1,7 +1,6 @@
 import json
 import pandas as pd
-import argparse
-import os
+import xlsxwriter
 
 # -----------------------------
 # Helpers
@@ -17,16 +16,66 @@ def flatten_values(val):
         return ",".join(str(v) for v in val)
     return val
 
+# -----------------------------
+# Condition ID collector
+# -----------------------------
+def collect_condition_def_ids_from_tree(id_map, root_node_id):
+    """Collect all ConditionDefinition IDs from a guardNode tree."""
+    stack, seen, result = [root_node_id], set(), set()
+    while stack:
+        nid = stack.pop()
+        if not nid or nid in seen:
+            continue
+        seen.add(nid)
+        node = id_map.get(nid, {})
+        if not node:
+            continue
+        if node.get("class") == "ConditionReferenceNode":
+            rid = node.get("definitionId") or node.get("ref") or node.get("conditionId")
+            if rid:
+                result.add(rid)
+        for key in ("inputNode", "guardNode", "condition", "lhsInputNode", "rhsInputNode"):
+            val = node.get(key)
+            if isinstance(val, str):
+                stack.append(val)
+        if isinstance(node.get("inputNodes"), list):
+            stack.extend(node.get("inputNodes"))
+    return result
 
 # -----------------------------
-# Policy Tree (Full Traversal)
+# pick_single_condition_path logic
+# -----------------------------
+def pick_single_condition_path(cond_names):
+    """Select the most relevant condition path string from candidate names."""
+    targeting = [c for c in cond_names if c.startswith("POLICY.TARGETING")]
+    toggles = [c for c in cond_names if c.startswith("POLICY.TOGGLES")]
+
+    def longest(cands): 
+        return max(cands, key=lambda s: len(s.split("."))) if cands else ""
+
+    if targeting:
+        action_first = [c for c in targeting if ".ACTION." in c]
+        return longest(action_first) if action_first else longest(targeting)
+    if toggles:
+        return longest(toggles)
+    return ""
+
+# -----------------------------
+# Policy Tree (PolicySet + Policy only)
 # -----------------------------
 def build_policy_tree(data):
-    metadata_nodes = [d for d in data if d.get("class") == "Metadata"]
+    """
+    Build the Policy Tree with correct Condition ID logic.
+    Includes only PolicySet and Policy nodes.
+    """
+    metadata_nodes = [
+        d for d in data
+        if d.get("class") == "Metadata" and d.get("originType") in ("PolicySet", "Policy")
+    ]
+    condition_defs = [d for d in data if d.get("class") == "ConditionDefinition"]
     id_lookup = {d["id"]: d for d in data if "id" in d}
     cd_nodes = {d["id"]: d for d in data if d.get("class") == "CombinedDecisionNode"}
 
-    # Map originLink → CombinedDecisionNode list
     origin_to_cdnode = {}
     for cd in cd_nodes.values():
         if cd.get("originLink"):
@@ -42,7 +91,22 @@ def build_policy_tree(data):
 
         fullpath_parts = path_names + [f"{node['originType']}:{node['name']}"]
 
-        # Extract Epic/Feature/Defect/Status/Version for entitlement check nodes
+        cond_names_parent = []
+        for cd in origin_to_cdnode.get(origin_id, []):
+            if cd.get("guardNode"):
+                for cid in collect_condition_def_ids_from_tree(id_lookup, cd["guardNode"]):
+                    cond = next((c for c in condition_defs if c["id"] == cid), None)
+                    if cond and cond.get("name"):
+                        cond_names_parent.append(cond["name"])
+
+        # ✅ Corrected Condition ID selection
+        cond_val_parent = pick_single_condition_path(list(set(cond_names_parent)))
+        cond_id_parent = next(
+            (c["id"] for c in condition_defs if c.get("name") == cond_val_parent),
+            ""
+        )
+
+        # Extract Entitlement Check properties
         epic = feature = defect = status = version = ""
         if node.get("originType") == "PolicySet" and str(node.get("name", "")).lower().startswith("entitlement check"):
             props = node.get("properties", {}) or {}
@@ -54,9 +118,10 @@ def build_policy_tree(data):
 
         records.append({
             "Position": position,
-            "ID": node.get("originId"),
+            "ID": node["originId"],
             "Policy FullPath": " / ".join(fullpath_parts),
-            "Condition ID": node.get("conditionId", ""),
+            "Condition Path": cond_val_parent,
+            "Condition ID": cond_id_parent,
             "Epic": epic,
             "Feature": feature,
             "Defect": defect,
@@ -64,7 +129,6 @@ def build_policy_tree(data):
             "Version": version
         })
 
-        # Traverse children
         for cd in origin_to_cdnode.get(origin_id, []):
             for i, inp_id in enumerate(cd.get("inputNodes", []), 1):
                 tmn = id_lookup.get(inp_id)
@@ -74,21 +138,20 @@ def build_policy_tree(data):
                 if child_id:
                     traverse(child_id, fullpath_parts, f"{position}.{i}")
 
-    # Root detection
     package_meta = next((m for m in data if m.get("class") in ("Package", "DeploymentPackage")), None)
-    root_id = package_meta.get("rootEntityId") if package_meta else None
+    if not package_meta:
+        raise ValueError("No rootEntityId found in deployment package.")
 
+    root_id = package_meta.get("rootEntityId")
     if root_id:
         traverse(root_id, [], "1")
 
     return pd.DataFrame(records)
 
-
 # -----------------------------
 # Action Extraction
 # -----------------------------
 def resolve_constants(node_id, id_lookup, attr_defs, seen=None):
-    """Recursively resolve ConstantNode values."""
     if seen is None:
         seen = set()
     if not node_id or node_id in seen:
@@ -118,7 +181,6 @@ def resolve_constants(node_id, id_lookup, attr_defs, seen=None):
     return list(set(results))
 
 def extract_actions(condition_defs, id_lookup, attr_defs):
-    """Extract ACTION.* conditions."""
     records = []
     for cond in condition_defs:
         if cond.get("name", "").startswith("ACTION."):
@@ -130,12 +192,10 @@ def extract_actions(condition_defs, id_lookup, attr_defs):
             })
     return pd.DataFrame(records)
 
-
 # -----------------------------
 # Targeting Extraction
 # -----------------------------
 def extract_targeting(condition_defs, id_lookup):
-    """Extract POLICY.TARGETING.* conditions and linked actions."""
     def collect_linked_action_conditions_with_ids(root_node_id):
         stack, seen, results = [root_node_id], set(), set()
         while stack:
@@ -176,12 +236,10 @@ def extract_targeting(condition_defs, id_lookup):
             })
     return pd.DataFrame(targeting_records)
 
-
 # -----------------------------
 # Merge Logic
 # -----------------------------
 def merge_datasets(df_policy_tree, df_action, df_policy_targeting):
-    """Join Policy_Tree, Action, and Targeting datasets logically."""
     merged_df = df_policy_tree.copy()
     if "Condition ID" in merged_df.columns:
         merged_df = merged_df.merge(df_policy_targeting, on="Condition ID", how="left")
@@ -192,42 +250,41 @@ def merge_datasets(df_policy_tree, df_action, df_policy_targeting):
         merged_df.drop(columns=["Value_action_action", "Value_action_target"], errors="ignore", inplace=True)
     return merged_df
 
-
 # -----------------------------
-# CLI Entry Point
+# Runner
 # -----------------------------
 def main():
-    parser = argparse.ArgumentParser(description="Extract Policy Tree, Actions, Targeting, and Merged datasets from a deployment package.")
-    parser.add_argument("-d", "--deployment", required=True, help="Path to the .deploymentpackage JSON file")
-    parser.add_argument("-o", "--output", default="Full_Extract_WithMerge.xlsx", help="Output Excel filename")
-    args = parser.parse_args()
-
-    if not os.path.exists(args.deployment):
-        print(f"❌ Deployment file not found: {args.deployment}")
-        return
-
-    print(f"📦 Loading deployment package: {args.deployment}")
-    data = safe_load_json(args.deployment)
+    deployment_path = "test.deploymentpackage"
+    data = safe_load_json(deployment_path)
 
     condition_defs = [d for d in data if d.get("class") == "ConditionDefinition"]
     attr_defs = {o["id"]: o for o in data if o.get("class") == "AttributeDefinition"}
     id_lookup = {d["id"]: d for d in data if "id" in d}
 
-    print("🔧 Building datasets...")
     df_policy_tree = build_policy_tree(data)
     df_action = extract_actions(condition_defs, id_lookup, attr_defs)
     df_policy_targeting = extract_targeting(condition_defs, id_lookup)
     df_merged = merge_datasets(df_policy_tree, df_action, df_policy_targeting)
 
-    # Export to Excel
-    with pd.ExcelWriter(args.output, engine="xlsxwriter") as writer:
+    output_path = "Policy_Export.xlsx"
+    with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
         df_policy_tree.to_excel(writer, sheet_name="Policy_Tree", index=False)
+        workbook = writer.book
+        worksheet = writer.sheets["Policy_Tree"]
+        yellow_fmt = workbook.add_format({"bg_color": "#FFF200"})  # Yellow
+        worksheet.freeze_panes(1, 0)
+        worksheet.autofilter(0, 0, len(df_policy_tree), len(df_policy_tree.columns) - 1)
+
+        # Highlight entitlement checks
+        for row_num, value in enumerate(df_policy_tree["Policy FullPath"], start=1):
+            if "entitlement check" in str(value).lower():
+                worksheet.set_row(row_num, None, yellow_fmt)
+
         df_action.to_excel(writer, sheet_name="Action", index=False)
         df_policy_targeting.to_excel(writer, sheet_name="Policy_Targeting", index=False)
         df_merged.to_excel(writer, sheet_name="Merged", index=False)
 
-    print(f"✅ Export complete: {args.output}")
-
+    print(f"✅ Export complete: {output_path}")
 
 if __name__ == "__main__":
     main()
