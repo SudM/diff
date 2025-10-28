@@ -1,17 +1,17 @@
 import json
 import pandas as pd
 import xlsxwriter
+import argparse
+import os
 
 # -----------------------------
 # Helpers
 # -----------------------------
 def safe_load_json(path):
-    """Safely load a JSON deployment package."""
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 def flatten_values(val):
-    """Flatten list-type property values to comma-separated strings."""
     if isinstance(val, list):
         return ",".join(str(v) for v in val)
     return val
@@ -20,7 +20,6 @@ def flatten_values(val):
 # Condition ID collector
 # -----------------------------
 def collect_condition_def_ids_from_tree(id_map, root_node_id):
-    """Collect all ConditionDefinition IDs from a guardNode tree."""
     stack, seen, result = [root_node_id], set(), set()
     while stack:
         nid = stack.pop()
@@ -43,14 +42,13 @@ def collect_condition_def_ids_from_tree(id_map, root_node_id):
     return result
 
 # -----------------------------
-# pick_single_condition_path logic
+# pick_single_condition_path
 # -----------------------------
 def pick_single_condition_path(cond_names):
-    """Select the most relevant condition path string from candidate names."""
     targeting = [c for c in cond_names if c.startswith("POLICY.TARGETING")]
     toggles = [c for c in cond_names if c.startswith("POLICY.TOGGLES")]
 
-    def longest(cands): 
+    def longest(cands):
         return max(cands, key=lambda s: len(s.split("."))) if cands else ""
 
     if targeting:
@@ -61,13 +59,9 @@ def pick_single_condition_path(cond_names):
     return ""
 
 # -----------------------------
-# Policy Tree (PolicySet + Policy only)
+# Policy Tree
 # -----------------------------
 def build_policy_tree(data):
-    """
-    Build the Policy Tree with correct Condition ID logic.
-    Includes only PolicySet and Policy nodes.
-    """
     metadata_nodes = [
         d for d in data
         if d.get("class") == "Metadata" and d.get("originType") in ("PolicySet", "Policy")
@@ -99,14 +93,12 @@ def build_policy_tree(data):
                     if cond and cond.get("name"):
                         cond_names_parent.append(cond["name"])
 
-        # ✅ Corrected Condition ID selection
         cond_val_parent = pick_single_condition_path(list(set(cond_names_parent)))
         cond_id_parent = next(
             (c["id"] for c in condition_defs if c.get("name") == cond_val_parent),
             ""
         )
 
-        # Extract Entitlement Check properties
         epic = feature = defect = status = version = ""
         if node.get("originType") == "PolicySet" and str(node.get("name", "")).lower().startswith("entitlement check"):
             props = node.get("properties", {}) or {}
@@ -251,12 +243,122 @@ def merge_datasets(df_policy_tree, df_action, df_policy_targeting):
     return merged_df
 
 # -----------------------------
-# Runner
+# Toggle JSON generator
+# -----------------------------
+def generate_package_toggle(merged_df):
+    # Filter relevant rows
+    df = merged_df[merged_df['Policy FullPath'].str.contains('Check Permission', case=False, na=False)].copy()
+
+    # Normalize Value_action and Status
+    df['Value_action'] = df['Value_action'].astype(str).str.strip().str.lower()
+    df['Status'] = df['Status'].astype(str).str.strip().str.upper()
+
+    # Drop invalid actions
+    invalid_actions = ["", "NAN", "NONE", "NULL"]
+    df = df[~df['Value_action'].isin(invalid_actions)]
+
+    # Mark real status
+    df['has_status'] = ~df['Status'].isin(["", "NAN", "NONE", "NULL"])
+
+    toggles = []
+
+    # Build per action logic — enabled if *any descendant path* with same action has status
+    for action in sorted(df['Value_action'].unique()):
+        if action in ("nan", "", "none", "null"):
+            continue  # Skip invalid
+        subset = df[df['Value_action'] == action]
+        enabled = bool(subset['has_status'].any())
+
+        # If not directly enabled, check descendant policy paths
+        if not enabled:
+            paths = subset['Policy FullPath'].tolist()
+            for p in df[df['has_status']]['Policy FullPath']:
+                if any(p.startswith(path) for path in paths):
+                    enabled = True
+                    break
+
+        toggles.append({
+            "action": str(action),
+            "isEnabled": bool(enabled)
+        })
+        print(f"DEBUG → {action} | Enabled={enabled}")
+
+    package_toggle = {
+        "schemaVersion": "1.0.0",
+        "strategy": "blacklist",
+        "toggles": {"checkPermissions": toggles}
+    }
+
+    # Dump to JSON (convert NumPy bools)
+    with open("package_toggle.json", "w", encoding="utf-8") as f:
+        json.dump(package_toggle, f, indent=2, ensure_ascii=False)
+
+    print(f"✅ package_toggle.json created successfully with {len(toggles)} toggles.")
+
+from collections import OrderedDict
+import json
+import os
+
+def merge_with_prod_toggle(package_toggle_path, prod_toggle_path, output_path="merged_toggle.json"):
+    """Merge new package_toggle.json with prod_toggle.json while preserving group order."""
+    with open(package_toggle_path, "r", encoding="utf-8") as f:
+        package_data = json.load(f)
+    with open(prod_toggle_path, "r", encoding="utf-8") as f:
+        prod_data = json.load(f, object_pairs_hook=OrderedDict)
+
+    merged = OrderedDict()
+    merged["schemaVersion"] = package_data.get("schemaVersion", "1.0.0")
+    merged["strategy"] = package_data.get("strategy", "blacklist")
+    merged["toggles"] = OrderedDict()
+
+    # Build a lookup for prod checkPermissions actions
+    prod_cp_lookup = {
+        i.get("action"): i
+        for i in prod_data.get("toggles", {}).get("checkPermissions", [])
+    }
+
+    # Build merged checkPermissions list
+    merged_cp = []
+    for pkg_item in package_data.get("toggles", {}).get("checkPermissions", []):
+        action = pkg_item.get("action")
+        if action in prod_cp_lookup:
+            merged_cp.append(prod_cp_lookup[action])  # Replace with prod version
+            print(f"→ Replaced from prod: {action}")
+        else:
+            merged_cp.append(pkg_item)  # Keep package version
+            print(f"→ Kept from package: {action}")
+
+    # Preserve prod toggle group order
+    for key in prod_data.get("toggles", OrderedDict()).keys():
+        if key == "checkPermissions":
+            merged["toggles"][key] = merged_cp
+        else:
+            merged["toggles"][key] = prod_data["toggles"][key]
+
+    # Append any *new* toggle groups that exist in package but not prod
+    for key, value in package_data.get("toggles", {}).items():
+        if key not in merged["toggles"]:
+            merged["toggles"][key] = value
+            print(f"→ Added new toggle group from package: {key}")
+
+    # Save with preserved order
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(merged, f, indent=2, ensure_ascii=False)
+
+    print(f"✅ Merged toggle file created with preserved order: {os.path.abspath(output_path)}")
+
+# -----------------------------
+# CLI Runner
 # -----------------------------
 def main():
-    deployment_path = "test.deploymentpackage"
-    data = safe_load_json(deployment_path)
+    parser = argparse.ArgumentParser(description="Export Policy Tree, Action, Targeting, and Package Toggle JSON.")
+    parser.add_argument("-d", "--deployment", required=True, help="Path to deployment package (.deploymentpackage)")
+    parser.add_argument("-o", "--output", default="Policy_Export.xlsx", help="Output Excel filename (default: Policy_Export.xlsx)")
+    parser.add_argument("-p", "--prod-toggle", help="Path to existing prod_toggle.json for merging")
+    
+    args = parser.parse_args()
 
+    data = safe_load_json(args.deployment)
     condition_defs = [d for d in data if d.get("class") == "ConditionDefinition"]
     attr_defs = {o["id"]: o for o in data if o.get("class") == "AttributeDefinition"}
     id_lookup = {d["id"]: d for d in data if "id" in d}
@@ -266,25 +368,21 @@ def main():
     df_policy_targeting = extract_targeting(condition_defs, id_lookup)
     df_merged = merge_datasets(df_policy_tree, df_action, df_policy_targeting)
 
-    output_path = "Policy_Export.xlsx"
-    with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
+    with pd.ExcelWriter(args.output, engine="xlsxwriter") as writer:
         df_policy_tree.to_excel(writer, sheet_name="Policy_Tree", index=False)
-        workbook = writer.book
-        worksheet = writer.sheets["Policy_Tree"]
-        yellow_fmt = workbook.add_format({"bg_color": "#FFF200"})  # Yellow
-        worksheet.freeze_panes(1, 0)
-        worksheet.autofilter(0, 0, len(df_policy_tree), len(df_policy_tree.columns) - 1)
-
-        # Highlight entitlement checks
-        for row_num, value in enumerate(df_policy_tree["Policy FullPath"], start=1):
-            if "entitlement check" in str(value).lower():
-                worksheet.set_row(row_num, None, yellow_fmt)
-
         df_action.to_excel(writer, sheet_name="Action", index=False)
         df_policy_targeting.to_excel(writer, sheet_name="Policy_Targeting", index=False)
         df_merged.to_excel(writer, sheet_name="Merged", index=False)
 
-    print(f"✅ Export complete: {output_path}")
+    # Generate the JSON toggle file
+    generate_package_toggle(df_merged)
+
+    # --- merge with prod if provided ---
+    if args.prod_toggle:
+        merge_with_prod_toggle("package_toggle.json", args.prod_toggle, "merged_toggle.json")
+
+
+    print(f"✅ Export complete: {os.path.abspath(args.output)}")
 
 if __name__ == "__main__":
     main()
