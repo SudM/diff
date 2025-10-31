@@ -1,8 +1,9 @@
 import json
 import pandas as pd
-import xlsxwriter
 import argparse
 import os
+import numpy as np
+from collections import OrderedDict
 
 # -----------------------------
 # Helpers
@@ -100,6 +101,7 @@ def build_policy_tree(data):
         )
 
         epic = feature = defect = status = version = ""
+        toggle_type = toggle_name = ""
         if node.get("originType") == "PolicySet" and str(node.get("name", "")).lower().startswith("entitlement check"):
             props = node.get("properties", {}) or {}
             epic = flatten_values(props.get("Epic", ""))
@@ -108,17 +110,44 @@ def build_policy_tree(data):
             status = flatten_values(props.get("Status", ""))
             version = flatten_values(props.get("Version", ""))
 
+        # --- NEW: Extract Toggle Type & Toggle Name from properties ---
+        props = node.get("properties", {}) or {}
+        if "Toggle Type" in props:
+            toggle_type = flatten_values(props.get("Toggle Type", ""))
+        if "Toggle Name" in props:
+            toggle_name = flatten_values(props.get("Toggle Name", ""))
+        
+        # --- NEW: Determine Action based on Policy FullPath ---
+        policy_fullpath = " / ".join(fullpath_parts)
+        lower_path = policy_fullpath.lower()
+        if "check permissions" in lower_path:
+            action = "checkpermission"
+        elif "get permissions" in lower_path:
+            action = "getpermission"
+        elif "check user capabilities" in lower_path:
+            action = "checkcapability"
+        else:
+            action = ""
+
+        # --- NEW: Map originType directly to Type ---
+        type_val = node.get("originType", "")
+
+        # --- Append record (with new columns) ---
         records.append({
             "Position": position,
             "ID": node["originId"],
-            "Policy FullPath": " / ".join(fullpath_parts),
+            "Policy FullPath": policy_fullpath,
             "Condition Path": cond_val_parent,
             "Condition ID": cond_id_parent,
             "Epic": epic,
             "Feature": feature,
             "Defect": defect,
             "Status": status,
-            "Version": version
+            "Version": version,
+            "Action": action,              # ← NEW
+            "Type": type_val,              # ← NEW
+            "Toggle Type": toggle_type,    # ← NEW
+            "Toggle Name": toggle_name     # ← NEW
         })
 
         for cd in origin_to_cdnode.get(origin_id, []):
@@ -245,6 +274,127 @@ def merge_datasets(df_policy_tree, df_action, df_policy_targeting):
 # -----------------------------
 # Toggle JSON generator
 # -----------------------------
+
+
+# ---------- Core Generator Function ----------
+def generate_package_toggle(merged_df):
+    """
+    Generate the full package toggle JSON from a merged DataFrame.
+    Expects columns: ID, Type, Action, Status, Version, Toggle Type, Toggle Name, Value_action
+    """
+
+    # ---------- Normalize column names ----------
+    df = merged_df.copy()
+    df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
+    for c in df.columns:
+        df[c] = df[c].astype(str).str.strip().str.lower().replace("nan", np.nan)
+
+    # ---------- Fill hierarchy columns ----------
+    for c in ["value_action", "toggle_type", "toggle_name"]:
+        if c in df.columns:
+            df[c] = df[c].ffill()
+
+    # ---------- Filter only checkpermission rows ----------
+    if "action" not in df.columns:
+        raise ValueError("Input DataFrame must contain an 'Action' column")
+    df_check = df[df["action"] == "checkpermission"].copy()
+
+    # ---------- Helper: get id for given toggle_type/toggle_name ----------
+    def get_id_for(group, toggle_type, toggle_name):
+        row = group[
+            (group["toggle_type"] == toggle_type)
+            & (group["toggle_name"] == toggle_name)
+        ]
+        return str(row["id"].iloc[0]) if not row.empty else None
+
+    # ---------- Core hierarchy builder ----------
+    def build_hierarchy(group):
+        result = {"isEnabled": True}
+        toggle_levels = [
+            lvl for lvl in group["toggle_type"].dropna().unique().tolist()
+            if lvl and lvl != "nan"
+        ]
+        current_level = result
+
+        # Build nested toggle levels dynamically
+        for toggle_type in toggle_levels:
+            toggle_names = [
+                n for n in group[group["toggle_type"] == toggle_type]["toggle_name"]
+                .dropna().unique().tolist() if n and n != "nan"
+            ]
+            if not toggle_names:
+                continue
+
+            items = []
+            for name in toggle_names:
+                node_id = get_id_for(group, toggle_type, name)
+                node = {"name": name, "isEnabled": True}
+                if node_id:
+                    node["id"] = node_id
+                items.append(node)
+            current_level[toggle_type] = items
+            current_level = items[0]  # descend into next level
+
+        # Determine ON/OFF logic
+        off_versions = group[group["status"] == "off"]
+        on_versions = group[group["status"] == "on"]
+        total = len(group)
+
+        if total > 0 and len(on_versions) == total:
+            return None  # all ON → skip
+
+        if len(off_versions) == 1:
+            # Single OFF → parent disabled
+            current_level["isEnabled"] = False
+        elif len(off_versions) > 1:
+            versions = []
+            for _, row in off_versions.iterrows():
+                versions.append({
+                    "name": str(row["version"]),
+                    "id": str(row["id"]),
+                    "type": str(row["type"]),
+                    "isEnabled": False
+                })
+            current_level["versions"] = versions
+
+        return result
+
+    # ---------- Build JSON structure ----------
+    output_data = []
+    for value_action, group in df_check.groupby("value_action"):
+        if not value_action or str(value_action).lower() == "nan":
+            continue
+        if len(group[group["status"] == "off"]) == 0:
+            continue
+
+        hierarchy = build_hierarchy(group)
+        if hierarchy is None:
+            continue
+
+        entry = {
+            "action": str(value_action),
+            "id": str(group["id"].iloc[0]),
+            "isEnabled": True
+        }
+        entry.update(hierarchy)
+        output_data.append(entry)
+
+    # ---------- Final JSON wrapper ----------
+    final_json = {
+        "schemaVersion": "1.0.0",
+        "strategy": "blacklist",
+        "toggles": {"checkPermissions": output_data}
+    }
+
+    # Save to file
+    with open("package_toggle.json", "w", encoding="utf-8") as f:
+        json.dump(final_json, f, indent=2)
+
+    print(json.dumps(final_json, indent=2))
+    print("\n✅ JSON saved as package_toggle.json")
+
+
+
 def generate_package_toggle(merged_df):
     # Filter relevant rows
     df = merged_df[merged_df['Policy FullPath'].str.contains('Check Permission', case=False, na=False)].copy()
