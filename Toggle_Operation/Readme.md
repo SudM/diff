@@ -1,0 +1,1 @@
+The Toggle-Operation folder covers all the required scripts to create policy tree structure, generation of toggle file from tree structure, relase update to a toggle fole, post release brach update and cleanup scripts.
