@@ -56,7 +56,7 @@ def load_data(path: Path) -> pd.DataFrame:
     df.columns = [c.strip() for c in df.columns]
 
     # Required columns validation
-    required = ["ID", "Action", "Value_action", "Type", "Toggle Type",
+    required = ["ID", "Service", "action_value", "Type", "Toggle Type",
                 "Toggle Name", "Version", "Status", "Policy FullPath"]
     cols = {k: next((c for c in df.columns if k.lower() in c.lower()), None) for k in required}
 
@@ -66,10 +66,10 @@ def load_data(path: Path) -> pd.DataFrame:
         raise ValueError(msg)
 
     # Filter only checkpermission actions
-    df = df[df[cols["Action"]].apply(safe_str) == "checkpermission"].copy()
+    df = df[df[cols["Service"]].apply(safe_str) == "checkpermission"].copy()
     df = df.assign(
-        clean_action=df[cols["Action"]].apply(safe_str),
-        clean_value=df[cols["Value_action"]].apply(safe_str),
+        clean_action=df[cols["Service"]].apply(safe_str),
+        clean_value=df[cols["action_value"]].apply(safe_str),
         clean_status=df[cols["Status"]].apply(safe_str),
         clean_category=df[cols["Type"]].apply(safe_str),
         clean_type=df[cols["Toggle Type"]].apply(safe_str),
@@ -87,7 +87,7 @@ def load_data(path: Path) -> pd.DataFrame:
 # ---------------------------------------------------------------------
 def get_action_groups(df: pd.DataFrame, cols: Dict) -> List[pd.DataFrame]:
     """
-    Split dataframe into subgroups by Value_action (5 path segments).
+    Split dataframe into subgroups by action.
     
     Args:
         df (pd.DataFrame): Cleaned policy DataFrame.
@@ -96,7 +96,7 @@ def get_action_groups(df: pd.DataFrame, cols: Dict) -> List[pd.DataFrame]:
     Returns:
         List[pd.DataFrame]: List of grouped DataFrames.
     """
-    logging.info("Grouping data by Value_action...")
+    logging.info("Grouping data by action...")
     groups = []
     action_rows = df[df["clean_value"].ne("")]
     for _, act_row in action_rows.iterrows():
@@ -161,13 +161,12 @@ def build_tree_from_paths(root_obj: Dict, node_map: Dict, path_df: pd.DataFrame,
 # ---------------------------------------------------------------------
 # Build Tree
 # ---------------------------------------------------------------------
-def build_tree(group: pd.DataFrame, debug_full_tree: bool = False) -> Any:
+def build_tree(group: pd.DataFrame) -> Any:
     """
-    Build a hierarchical tree for a single Value_action group.
+    Build a hierarchical tree for a single action group.
 
     Args:
         group (pd.DataFrame): Grouped subset of policy rows.
-        debug_full_tree (bool): If True, return complete tree for debugging.
 
     Returns:
         Dict | None: Constructed JSON-ready action tree.
@@ -275,7 +274,7 @@ def build_tree(group: pd.DataFrame, debug_full_tree: bool = False) -> Any:
 # ---------------------------------------------------------------------
 # Main Execution
 # ---------------------------------------------------------------------
-def main(input_xlsx="input.xlsx", output_json="package_toggle.json", full_tree=False):
+def main(input_xlsx="./output/Policy_Export.xlsx", output_json="./output/package_toggle.json"):
     """
     Main entry point. Loads Excel, groups by action, builds trees, and exports JSON.
 
@@ -293,9 +292,8 @@ def main(input_xlsx="input.xlsx", output_json="package_toggle.json", full_tree=F
             "strategy": "blacklist",
             "toggles": {"checkPermissions": []}
         }
-
         for g in get_action_groups(df, cols):
-            tree = build_tree(g, debug_full_tree=full_tree)
+            tree = build_tree(g)
             if tree:
                 result["toggles"]["checkPermissions"].append(tree)
 
@@ -306,9 +304,6 @@ def main(input_xlsx="input.xlsx", output_json="package_toggle.json", full_tree=F
         logging.exception(f"Error in main: {e}")
         raise
 
-
 if __name__ == "__main__":
     import sys
-    full = "--full" in sys.argv
-    args = [a for a in sys.argv[1:] if a != "--full"]
-    main(*args if len(args) >= 2 else ("input.xlsx", "full_tree.json" if full else "package_toggle.json"), full_tree=full)
+    main()

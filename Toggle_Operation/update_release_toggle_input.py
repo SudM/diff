@@ -58,12 +58,12 @@ def load_sheet1(excel_path: str) -> pd.DataFrame:
 
     except FileNotFoundError:
         logging.exception(f"Excel file not found: {excel_path}")
-        print(f"❌ Excel file not found: {excel_path}")
+        print(f" Excel file not found: {excel_path}")
         sys.exit(1)
 
     except Exception as e:
         logging.exception(f"Error loading sheet: {e}")
-        print(f"❌ Error reading Excel sheet. Check {LOG_FILE} for details.")
+        print(f"Error reading Excel sheet. Check {LOG_FILE} for details.")
         sys.exit(1)
 
 
@@ -115,7 +115,7 @@ def traverse_toggle_path(action: dict, path: list) -> dict:
                         break
             if not found:
                 logging.warning(f"Path not found: {name}")
-                print(f"  ⚠️ Path not found: {name}")
+                print(f" Path not found: {name}")
                 return None
         return current
     except Exception as e:
@@ -152,7 +152,7 @@ def recompute_isEnabled(node: dict) -> bool:
 # ---------------------------------------------------------------------
 # Main Logic
 # ---------------------------------------------------------------------
-def main(excel_file="release.xlsx", json_file="package_toggle.json"):
+def main(excel_file="./input/release.xlsx", json_file="./output/package_toggle.json"):
     """
     Main function to:
     1. Load Sheet1 from Excel.
@@ -171,7 +171,7 @@ def main(excel_file="release.xlsx", json_file="package_toggle.json"):
 
         if not path.exists():
             logging.error(f"JSON file not found: {json_file}")
-            print(f"❌ JSON file not found: {json_file}")
+            print(f" JSON file not found: {json_file}")
             sys.exit(1)
 
         with open(path, "r", encoding="utf-8") as f:
@@ -190,7 +190,7 @@ def main(excel_file="release.xlsx", json_file="package_toggle.json"):
 
             action = find_action(data, action_value)
             if not action:
-                print("  ⚠️ Action not found.")
+                print("Action not found.")
                 logging.warning(f"Action not found: {action_value}")
                 continue
 
@@ -201,14 +201,14 @@ def main(excel_file="release.xlsx", json_file="package_toggle.json"):
             versions = toggle_node.get("versions", [])
             version_node = next((v for v in versions if v.get("name", "").upper() == version_name.upper()), None)
             if not version_node:
-                print(f"  ⚠️ Version {version_name} not found.")
+                print(f" Version {version_name} not found.")
                 logging.warning(f"Version not found: {version_name} in {toggle_path}")
                 continue
 
             version_node["isEnabled"] = is_enabled
             updated += 1
             logging.info(f"Set {version_name}.isEnabled = {is_enabled}")
-            print(f"  ✅ Set {version_name}.isEnabled = {is_enabled}")
+            print(f" Set {version_name}.isEnabled = {is_enabled}")
 
         # Recompute all isEnabled values
         print("\nRecomputing isEnabled...")
@@ -231,12 +231,12 @@ def main(excel_file="release.xlsx", json_file="package_toggle.json"):
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
 
-        logging.info(f"✅ Updated {updated} version entries. Saved to {json_file}")
-        print(f"\n✅ Updated {updated} versions → saved to {json_file}")
+        logging.info(f" Updated {updated} version entries. Saved to {json_file}")
+        print(f"\n Updated {updated} versions → saved to {json_file}")
 
     except Exception as e:
         logging.exception(f"Critical error in main(): {e}")
-        print(f"❌ Critical error occurred. Check {LOG_FILE} for details.")
+        print(f" Critical error occurred. Check {LOG_FILE} for details.")
         sys.exit(1)
     finally:
         logging.info("=== Toggle update process completed ===")
@@ -247,10 +247,11 @@ def main(excel_file="release.xlsx", json_file="package_toggle.json"):
 # ---------------------------------------------------------------------
 if __name__ == "__main__":
     try:
-        excel_file = sys.argv[1] if len(sys.argv) > 1 else "release.xlsx"
-        json_file = sys.argv[2] if len(sys.argv) > 2 else "package_toggle.json"
-        main(excel_file, json_file)
+        main()
     except KeyboardInterrupt:
         logging.warning("Process interrupted by user.")
-        print("\n⚠️ Process interrupted by user.")
+        print("\n Process interrupted by user.")
         sys.exit(0)
+
+
+

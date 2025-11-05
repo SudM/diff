@@ -4,11 +4,8 @@ generate_policy_list.py
 -----------------------
 Generates a Policy Tree, Action, and Targeting report from a PingAuthorize
 deployment package (.deploymentpackage) and exports the results to Excel.
-Then it builds a `package_toggle.json` and optionally merges it with
-a production toggle file.
 
 """
-
 import json
 import pandas as pd
 import argparse
@@ -164,7 +161,7 @@ def build_policy_tree(data):
             "Defect": defect,
             "Status": status,
             "Version": version,
-            "Action": action,
+            "Service": action,
             "Type": node.get("originType", ""),
             "Toggle Type": toggle_type,
             "Toggle Name": toggle_name
@@ -299,8 +296,8 @@ def merge_datasets(df_policy_tree, df_action, df_policy_targeting):
             logging.warning("⚠️ Skipping merge with Action: missing 'Action ID'.")
 
         if "Value_action_action" in merged_df.columns:
-            merged_df["Value_action"] = merged_df["Value_action_action"]
-            merged_df.drop(columns=["Value_action_action", "Value_action_target"], errors="ignore", inplace=True)
+            merged_df["action_value"] = merged_df["Value_action_action"]
+            merged_df.drop(columns=["Value_action_action", "Value_action_target","Condition Path","Condition ID","Full Path_target","Action ID","Category","Full Path_action"], errors="ignore", inplace=True)
 
         logging.info(f"Merged dataset created with {len(merged_df)} rows.")
         return merged_df
@@ -316,94 +313,13 @@ def merge_datasets(df_policy_tree, df_action, df_policy_targeting):
         sys.exit(1)
 
 # ---------------------------------------------------------------------
-# Toggle JSON Generator
-# ---------------------------------------------------------------------
-def generate_package_toggle(merged_df):
-    """Generate package_toggle.json from merged DataFrame."""
-    logging.info("Generating package_toggle.json ...")
-    df = merged_df[merged_df['Policy FullPath'].str.contains('Check Permission', case=False, na=False)].copy()
-    df['Value_action'] = df['Value_action'].astype(str).str.strip().str.lower()
-    df['Status'] = df['Status'].astype(str).str.strip().str.upper()
-    invalid_actions = ["", "NAN", "NONE", "NULL"]
-    df = df[~df['Value_action'].isin(invalid_actions)]
-    df['has_status'] = ~df['Status'].isin(["", "NAN", "NONE", "NULL"])
-
-    toggles = []
-    for action in sorted(df['Value_action'].unique()):
-        if action in ("nan", "", "none", "null"):
-            continue
-        subset = df[df['Value_action'] == action]
-        enabled = bool(subset['has_status'].any())
-        if not enabled:
-            paths = subset['Policy FullPath'].tolist()
-            for p in df[df['has_status']]['Policy FullPath']:
-                if any(p.startswith(path) for path in paths):
-                    enabled = True
-                    break
-        toggles.append({"action": str(action), "isEnabled": bool(enabled)})
-        logging.info(f"Action {action} | Enabled={enabled}")
-
-    package_toggle = {
-        "schemaVersion": "1.0.0",
-        "strategy": "blacklist",
-        "toggles": {"checkPermissions": toggles}
-    }
-
-    with open("package_toggle.json", "w", encoding="utf-8") as f:
-        json.dump(package_toggle, f, indent=2, ensure_ascii=False)
-    logging.info(f"✅ package_toggle.json created ({len(toggles)} toggles)")
-
-# ---------------------------------------------------------------------
-# Merge with Production Toggle
-# ---------------------------------------------------------------------
-def merge_with_prod_toggle(package_toggle_path, prod_toggle_path, output_path="merged_toggle.json"):
-    """Merge new package_toggle.json with production toggle."""
-    logging.info("Merging with production toggle ...")
-    with open(package_toggle_path, "r", encoding="utf-8") as f:
-        package_data = json.load(f)
-    with open(prod_toggle_path, "r", encoding="utf-8") as f:
-        prod_data = json.load(f, object_pairs_hook=OrderedDict)
-
-    merged = OrderedDict()
-    merged["schemaVersion"] = package_data.get("schemaVersion", "1.0.0")
-    merged["strategy"] = package_data.get("strategy", "blacklist")
-    merged["toggles"] = OrderedDict()
-
-    prod_cp_lookup = {
-        i.get("action"): i for i in prod_data.get("toggles", {}).get("checkPermissions", [])
-    }
-
-    merged_cp = []
-    for pkg_item in package_data.get("toggles", {}).get("checkPermissions", []):
-        action = pkg_item.get("action")
-        if action in prod_cp_lookup:
-            merged_cp.append(prod_cp_lookup[action])
-            logging.info(f"→ Replaced from prod: {action}")
-        else:
-            merged_cp.append(pkg_item)
-            logging.info(f"→ Kept from package: {action}")
-
-    for key in prod_data.get("toggles", OrderedDict()).keys():
-        merged["toggles"][key] = merged_cp if key == "checkPermissions" else prod_data["toggles"][key]
-
-    for key, value in package_data.get("toggles", {}).items():
-        if key not in merged["toggles"]:
-            merged["toggles"][key] = value
-            logging.info(f"→ Added new toggle group: {key}")
-
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(merged, f, indent=2, ensure_ascii=False)
-    logging.info(f"✅ Merged toggle saved: {os.path.abspath(output_path)}")
-
-# ---------------------------------------------------------------------
 # CLI Entry Point
 # ---------------------------------------------------------------------
 def main():
     """Main CLI entry point for policy export and toggle generation."""
     parser = argparse.ArgumentParser(description="Export Policy Tree and generate Toggle JSON.")
     parser.add_argument("-d", "--deployment", required=True, help="Path to .deploymentpackage file")
-    parser.add_argument("-o", "--output", default="Policy_Export.xlsx", help="Output Excel filename")
-    parser.add_argument("-p", "--prod-toggle", help="Optional path to production toggle for merging")
+    parser.add_argument("-o", "--output", default="./output/Policy_Export.xlsx", help="Output Excel filename")
     args = parser.parse_args()
 
     try:
@@ -420,15 +336,7 @@ def main():
         df_merged = merge_datasets(df_policy_tree, df_action, df_targeting)
 
         with pd.ExcelWriter(args.output, engine="xlsxwriter") as writer:
-            df_policy_tree.to_excel(writer, sheet_name="Policy_Tree", index=False)
-            df_action.to_excel(writer, sheet_name="Action", index=False)
-            df_targeting.to_excel(writer, sheet_name="Policy_Targeting", index=False)
-            df_merged.to_excel(writer, sheet_name="Merged", index=False)
-
-        generate_package_toggle(df_merged)
-
-        if args.prod_toggle:
-            merge_with_prod_toggle("package_toggle.json", args.prod_toggle, "merged_toggle.json")
+            df_merged.to_excel(writer, sheet_name="Policy_Tree", index=False)
 
         logging.info(f"✅ Export complete: {os.path.abspath(args.output)}")
         print(f"✅ Export complete: {os.path.abspath(args.output)}")
