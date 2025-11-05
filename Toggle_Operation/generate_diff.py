@@ -33,5 +33,3 @@ if __name__ == "__main__":
     p.add_argument("-o", "--output", type=Path, default=Path("./output/DiffReport.html"))
     a = p.parse_args()
     main(a.prod, a.final, a.output)
-
-
