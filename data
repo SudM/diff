@@ -1,1 +1,135 @@
+| Name                                    | Type     | Parent / Processor                                                    |
+| --------------------------------------- | -------- | --------------------------------------------------------------------- |
+| `Model.Subject.type`                    | String   | Parent: `Integration.Auth.ConsentToken` → map `claims.subjectType`    |
+| `Model.Subject.tenancy`                 | String   | Parent: `Integration.Auth.ConsentToken` → map `claims.tenancy`        |
+| `Model.Subject.partnerId`               | String   | Parent: `Integration.Auth.ConsentToken` → `claims.partner_id`         |
+| `Model.Subject.channelAccessProfiles[]` | String[] | Parent: `Integration.Auth.ConsentToken` → `claims.channel_profiles[]` |
+| `Model.Subject.paymentAccessProfiles[]` | String[] | Parent: `Integration.Auth.ConsentToken` → `claims.payment_profiles[]` |
 
+| Name                           | Type   | Parent / Processor                                                               |
+| ------------------------------ | ------ | -------------------------------------------------------------------------------- |
+| `Model.Payment.id`             | String | `Integration.Payments.PaymentDetails` → `$.paymentId`                            |
+| `Model.Payment.type`           | String | `Integration.Payments.PaymentDetails` → `$.paymentType`                          |
+| `Model.Payment.amount`         | Number | `Integration.Payments.PaymentDetails` → `$.amount.value`                         |
+| `Model.Payment.currency`       | String | `Integration.Payments.PaymentDetails` → `$.amount.currency`                      |
+| `Model.Payment.debitAccountId` | String | `Integration.Payments.PaymentDetails` → `$.debitAccountId`                       |
+| `Model.Payment.rails`          | String | `Integration.Payments.PaymentDetails` → `$.rails` (NPP / SWIFT / INTERNAL, etc.) |
+
+| Name                               | Type     | Parent / Processor                                                    |
+| ---------------------------------- | -------- | --------------------------------------------------------------------- |
+| `Model.Consent.id`                 | String   | `Integration.Auth.ConsentToken` → `claims.consent_id`                 |
+| `Model.Consent.status`             | String   | `Integration.Auth.ConsentToken` → `claims.consent_status`             |
+| `Model.Consent.type`               | String   | `Integration.Auth.ConsentToken` → `claims.consent_type`               |
+| `Model.Consent.scopes[]`           | String[] | `Integration.Auth.ConsentToken` → `claims.scopes[]`                   |
+| `Model.Consent.linkedAccountIds[]` | String[] | `Integration.Auth.ConsentToken` → `claims.account_ids[]`              |
+| `Model.Consent.expiryDate`         | DateTime | `Integration.Auth.ConsentToken` → `claims.exp` (converted from epoch) |
+| `Model.Consent.isActive`           | Boolean  | **Derived** (see next row)                                            |
+
+| Name                                        | Type     | Parent / Processor                                                                |
+| ------------------------------------------- | -------- | --------------------------------------------------------------------------------- |
+| `Model.Account.id`                          | String   | `Integration.Accounts.AccountDetails` → `$.accountId`                             |
+| `Model.Account.ownerCustomerId`             | String   | `Integration.Accounts.AccountDetails` → `$.owner.customerId`                      |
+| `Model.Account.status`                      | String   | `Integration.Accounts.AccountDetails` → `$.status` (map to ACTIVE/BLOCKED/CLOSED) |
+| `Model.Account.channelVisibilityProfiles[]` | String[] | `Integration.Accounts.AccountDetails` → `$.visibilityProfiles[]`                  |
+
+
+| Name                      | Type   | Parent / Processor                                           |
+| ------------------------- | ------ | ------------------------------------------------------------ |
+| `Model.Context.actionId`  | String | Derived from request path/method or Action URI mapping table |
+| `Model.Context.channel`   | String | From header `X-Channel` or introspected token (`WEB`, `API`) |
+| `Model.Context.ipAddress` | String | From request context                                         |
+| `Model.Context.riskScore` | Number | (Optional) from a RiskService integration                    |
+
+
++---------------------------+
+|        Integration        |
++---------------------------+
+| Auth.ConsentToken         |  <-- JWT / token from IdP
+| Payments.PaymentDetails   |  <-- payment request body
+| Accounts.AccountDetails   |  <-- core/arrangements API
++---------------------------+
+             |
+             |  (processors / value mappers)
+             v
++---------------------------+
+|           Model           |
++---------------------------+
+| Subject:                  |
+|   type, tenancy,          |
+|   channelAccessProfiles[] |
+|   paymentAccessProfiles[] |
+|   partnerId               |
+|                           |
+| Payment:                  |
+|   id, type, amount,       |
+|   currency, debitAccountId|
+|   rails                   |
+|                           |
+| Consent:                  |
+|   id, status, type,       |
+|   scopes[],               |
+|   linkedAccountIds[],     |
+|   isActive                |
+|                           |
+| Account:                  |
+|   id, ownerCustomerId,    |
+|   status,                 |
+|   channelVisibilityProfiles[] |
+|                           |
+| Context:                  |
+|   actionId, channel,      |
+|   ipAddress, riskScore    |
++---------------------------+
+             |
+             v
++---------------------------+
+|     Named Conditions      |
++---------------------------+
+| IsTrustedPartner          |
+| IsInternetBankingUser     |
+| HasIBChannelAccessProfile |
+| HasPartnerPaymentProfile  |
+| ConsentIsApproved         |
+| ConsentIsPaymentScope     |
+| ConsentActiveOnLinkedAcct |
+| PaymentTypeAllowedFor...  |
+| AccountVisibleToPartnerAPI|
+| IsAccountOwner            |
+| IsHighRiskContext         |
+| ...                       |
++---------------------------+
+             |
+             v
++---------------------------------------------+
+|           Policy Sets / Policies            |
++---------------------------------------------+
+| Global Guardrails                           |
+|   - Block High Risk Payments (Deny)         |
+|                                             |
+| Payments Base                               |
+|   - Cancel Own Pending Payment (Permit)     |
+|                                             |
+| Trusted Partner Payments                    |
+|   Target: IsTrustedPartner && IsApiChannel  |
+|   - Trusted Partner Create Payment          |
+|       Permit if                             |
+|         IsTrustedPartner                    |
+|         && ConsentIsApproved                |
+|         && ConsentIsPaymentScope            |
+|         && ConsentActiveOnLinkedAcct        |
+|         && PaymentTypeAllowedForPartners    |
+|         && AccountVisibleToPartnerAPI       |
+|         && IsMediumOrLowRiskContext         |
+|   Default: Deny                             |
+|                                             |
+| IB Payments                                 |
+|   Target: IsInternetBankingUser             |
+|   - IB Create Payment                       |
+|   - IB Cancel Payment                       |
+|   Default: Deny                             |
+|                                             |
+| OB Payments (optional)                      |
+|   Target: HasOBAccessProfile                |
+|   - OB Create Payment                       |
+|   ...                                       |
++---------------------------------------------+
